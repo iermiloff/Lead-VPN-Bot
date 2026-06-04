@@ -562,9 +562,12 @@ async def process_channel_revenue(message: types.Message, state: FSMContext):
 
 async def generate_final_report(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    queue = data['queue']
-    revenues = data['revenues']
-    await state.clear()
+    queue = data.get('queue', [])
+    revenues = data.get('revenues', {})
+    
+    # Сбрасываем только переменные шагов расчета, сохраняя возможность повторного запуска в следующем месяце
+    await state.update_data(current_index=0, revenues={})
+    await state.set_state(None) # Выходим из режима ввода цифр
     
     partner_payouts = {}
     details_log = ""
@@ -573,7 +576,8 @@ async def generate_final_report(message: types.Message, state: FSMContext):
     
     for order in queue:
         order_id, target_type, channel, username, client_id, ref_l1, ref_l2 = order
-        incoming_sum = revenues.get(order_id, 0.0)
+        
+        incoming_sum = revenues.get(str(order_id), 0.0)
         total_received_money += incoming_sum
         display_name = f"@{username} (Друзья)" if target_type == "Для друзей" else channel
         
@@ -582,7 +586,7 @@ async def generate_final_report(message: types.Message, state: FSMContext):
         my_clean_share = incoming_sum - ref_l1_share - ref_l2_share
         total_clean_profit += my_clean_share
         
-        details_log += f"🔹 <code>{display_name}</code> | Поступило: {incoming_sum:.2f}р\n"
+        details_log += f"🔹 Заявка #{order_id} | <code>{display_name}</code>\n└ Поступило: {incoming_sum:.2f}р\n"
         if ref_l1 != "нет": details_log += f" ├ L1 ({ref_l1} - 30%): {ref_l1_share:.2f}р\n"
         if ref_l2 != "нет": details_log += f" ├ L2 ({ref_l2} - 10%): {ref_l2_share:.2f}р\n"
         details_log += f" └ Ваш профит: {my_clean_share:.2f}р\n\n"
@@ -606,7 +610,7 @@ async def generate_final_report(message: types.Message, state: FSMContext):
                 )
             except Exception: 
                 pass
-
+                
     final_report = (
         f"📊 <b>ОТЧЕТ И РАССЫЛКА</b>\n\n"
         f"{details_log}--------------------\n"
