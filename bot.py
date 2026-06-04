@@ -510,7 +510,7 @@ async def process_wallet(message: types.Message, state: FSMContext):
     await show_partner_cabinet(message, message.from_user.id, message.from_user.username, state)
 
 
-# --- МОДУЛЬ РАСЧЕТА ВЫПЛАТ АДМИНОМ ---
+# --- ИСПРАВЛЕННЫЙ МОДУЛЬ РАСЧЕТА ВЫПЛАТ АДМИНОМ ---
 
 @dp.callback_query(F.data == "admin_start_calc")
 async def admin_start_calculation(callback: types.CallbackQuery, state: FSMContext):
@@ -522,20 +522,22 @@ async def admin_start_calculation(callback: types.CallbackQuery, state: FSMConte
     if not active_orders: 
         return await callback.message.answer("❌ Нет запущенных VPN-сервисов (Установлен) для расчета.")
         
-    await state.update_data(queue=active_orders, current_index=0, revenues={})
+    # Сбрасываем и инициализируем состояние заново
+    await state.set_data({"queue": active_orders, "current_index": 0, "revenues": {}})
     await ask_next_channel_revenue(callback.message, state)
 
 
 async def ask_next_channel_revenue(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    queue = data['queue']
-    idx = data['current_index']
+    queue = data.get('queue', [])
+    idx = data.get('current_index', 0)
     
     if idx < len(queue):
         order = queue[idx]
         order_id, target_type, channel, username, client_id, ref_l1, ref_l2 = order
         display_name = f"@{username} (Друзья)" if target_type == "Для друзей" else channel
-        await message.answer(f"📊 <b>Шаг {idx+1}/{len(queue)}</b>\nВведите сумму выручки от:\n<code>{display_name}</code>", parse_mode="HTML")
+        
+        await message.answer(f"📊 <b>Шаг {idx+1}/{len(queue)}</b>\nВведите сумму выручки для Заявки #{order_id} от:\n<code>{display_name}</code>", parse_mode="HTML")
         await state.set_state(AdminCalculation.entering_revenues)
     else: 
         await generate_final_report(message, state)
@@ -545,20 +547,32 @@ async def ask_next_channel_revenue(message: types.Message, state: FSMContext):
 async def process_channel_revenue(message: types.Message, state: FSMContext):
     if message.from_user.id != MAIN_ADMIN_ID: 
         return
+        
     try: 
-        revenue = float(message.text)
+        revenue = float(message.text.strip())
     except ValueError: 
-        return await message.answer("❌ Введите число:")
+        return await message.answer("❌ Введите корректное число:")
         
     data = await state.get_data()
-    queue = data['queue']
-    idx = data['current_index']
-    revenues = data['revenues']
+    queue = data.get('queue', [])
+    idx = data.get('current_index', 0)
+    revenues = data.get('revenues', {})
     
-    revenues[queue[idx]] = revenue
+    # Защита от выхода за границы, если админ прислал текст повторно
+    if idx >= len(queue):
+        return await generate_final_report(message, state)
+        
+    order = queue[idx]
+    order_id = order[0] # Берем строго числовой ID заявки
+    
+    # Сохраняем выручку строго по ID заявки в качестве ключа
+    revenues[str(order_id)] = revenue
+    
+    # Сразу обновляем индекс и данные, чтобы избежать параллельных накладок
     await state.update_data(revenues=revenues, current_index=idx + 1)
+    
+    # Переходим к следующему шагу
     await ask_next_channel_revenue(message, state)
-
 
 async def generate_final_report(message: types.Message, state: FSMContext):
     data = await state.get_data()
