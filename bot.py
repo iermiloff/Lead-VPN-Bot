@@ -59,7 +59,7 @@ def init_db():
 
 init_db()
 
-# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ (ПОЛЬЗОВАТЕЛИ) ---
 
 def add_user(tg_id, username, referrer_code):
     conn = sqlite3.connect(DB_FILE)
@@ -67,11 +67,13 @@ def add_user(tg_id, username, referrer_code):
     username_str = username if username else f"id_{tg_id}"
     parent_referrer = "нет"
     
+    # Защита от саморефералов: реферер не должен совпадать с ID или username юзера
     if referrer_code and referrer_code != "нет":
-        cursor.execute("SELECT tg_id, username FROM users WHERE username = ? OR tg_id = ?", (str(referrer_code), str(referrer_code)))
-        row = cursor.fetchone()
-        if row: 
-            parent_referrer = row[1] if row[1] and not row[1].startswith("id_") else str(row[0])
+        if str(referrer_code) != str(tg_id) and str(referrer_code) != str(username):
+            cursor.execute("SELECT tg_id, username FROM users WHERE username = ? OR tg_id = ?", (str(referrer_code), str(referrer_code)))
+            row = cursor.fetchone()
+            if row: 
+                parent_referrer = row[1] if row[1] and not row[1].startswith("id_") else str(row[0])
             
     cursor.execute("INSERT OR IGNORE INTO users (tg_id, username, referrer_code, parent_referrer) VALUES (?, ?, ?, ?)", 
                    (tg_id, username_str, referrer_code, parent_referrer))
@@ -100,6 +102,7 @@ def get_tg_id_by_code(code):
     row = cursor.fetchone()
     conn.close()
     return row[0] if row else None
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ (ЗАЯВКИ И РЕФЕРАЛЫ) ---
 
 def add_order(client_id, target_type, channel, ref_level_1):
     conn = sqlite3.connect(DB_FILE)
@@ -108,7 +111,7 @@ def add_order(client_id, target_type, channel, ref_level_1):
     if ref_level_1 != "нет":
         cursor.execute("SELECT parent_referrer FROM users WHERE username = ? OR tg_id = ?", (ref_level_1, ref_level_1))
         row = cursor.fetchone()
-        if row: ref_level_2 = row[0]
+        if row: ref_level_2 = row
         
     cursor.execute("""
         INSERT INTO orders (client_id, target_type, channel, ref_level_1, ref_level_2, status, status_code) 
@@ -152,6 +155,8 @@ def get_partner_stats(partner_code):
     sub_partners_count = row[0] if row else 0
     conn.close()
     return level_1_orders, level_2_orders, sub_partners_count
+
+
 # --- СОСТОЯНИЯ FSM ---
 class VPNOrder(StatesGroup):
     target_type = State()
@@ -172,6 +177,7 @@ def main_menu(user_id):
     # Если зашел администратор
     if user_id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton(text="💼 Панель CRM (Заявки)", callback_data="admin_crm_list")])
+        buttons.append([InlineKeyboardButton(text="🗄️ Архив (Закрытые заявки)", callback_data="admin_crm_archive")])
         if user_id == MAIN_ADMIN_ID:
             buttons.append([InlineKeyboardButton(text="🧮 Расчет выплат", callback_data="admin_start_calc")])
     # Если зашел обычный клиент
@@ -199,8 +205,6 @@ async def cmd_start(message: types.Message, command: CommandObject, state: FSMCo
         else "Привет! Я бот-ассистент сервиса VPN-конструктора.\nПомогаю запустить ваш собственный VPN за 5 минут без ИТ-знаний."
     )
     await message.answer(welcome_text, reply_markup=main_menu(message.from_user.id))
-
-
 # --- МОНИТОРИНГ СТАТУСОВ ДЛЯ КЛИЕНТА ---
 
 @dp.callback_query(F.data == "client_orders_status")
@@ -254,7 +258,6 @@ def get_crm_keyboard(order_id, current_status):
 async def admin_crm_list(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("У вас нет прав.", show_alert=True)
-        
     await callback.answer()
     
     conn = sqlite3.connect(DB_FILE)
@@ -270,7 +273,7 @@ async def admin_crm_list(callback: types.CallbackQuery):
     conn.close()
     
     if not rows:
-        return await callback.message.answer("🎉 Все заявки обработаны! Новых пока нет.")
+        return await callback.message.answer("🎉 Все активные заявки обработаны! Новых пока нет.")
         
     await callback.message.answer("📂 <b>Список активных заявок в CRM:</b>", parse_mode="HTML")
     for o_id, t_type, status, username in rows:
@@ -281,6 +284,39 @@ async def admin_crm_list(callback: types.CallbackQuery):
             f"📊 Статус: <code>{status}</code>"
         )
         await callback.message.answer(msg, parse_mode="HTML", reply_markup=get_crm_keyboard(o_id, status))
+
+
+@dp.callback_query(F.data == "admin_crm_archive")
+async def admin_crm_archive(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("У вас нет прав.", show_alert=True)
+    await callback.answer()
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT o.id, o.target_type, o.status, u.username, o.processed_by 
+        FROM orders o 
+        JOIN users u ON o.client_id = u.tg_id 
+        WHERE o.status_code IN ('install', 'reject')
+        ORDER BY o.id DESC LIMIT 50
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        return await callback.message.answer("📭 В архиве пока нет закрытых заявок.")
+        
+    await callback.message.answer("🗄️ <b>Архив закрытых заявок (Последние 50):</b>", parse_mode="HTML")
+    for o_id, t_type, status, username, processed_by in rows:
+        msg = (
+            f"📦 <b>Заявка #{o_id}</b> (Архив)\n"
+            f"👤 От: @{username}\n"
+            f"🎯 Тип: {t_type}\n"
+            f"📊 Итог: <code>{status}</code>\n"
+            f"🧑‍💻 Лог: {processed_by}"
+        )
+        await callback.message.answer(msg, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("crm_status_"))
@@ -301,14 +337,14 @@ async def handle_crm_status_change(callback: types.CallbackQuery):
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT locked_by_admin_id, status FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT locked_by_admin_id, status, client_id, target_type FROM orders WHERE id = ?", (order_id,))
     row = cursor.fetchone()
     
     if not row:
         conn.close()
         return await callback.answer("Ошибка: Заявка не найдена в базе.", show_alert=True)
         
-    locked_by, current_db_status = row
+    locked_by, current_db_status, client_id, target_type = row
     
     if action == "work" and locked_by is not None and locked_by != callback.from_user.id:
         conn.close()
@@ -330,6 +366,20 @@ async def handle_crm_status_change(callback: types.CallbackQuery):
     
     await callback.answer(f"Установлен статус: {new_status}")
     
+    if action == "work":
+        try:
+            await bot.send_message(
+                chat_id=client_id,
+                text=(
+                    f"⚙️ <b>Ваша заявка #{order_id} принята в работу!</b>\n\n"
+                    f"Менеджер {manager_username} уже занимается развертыванием вашего VPN-сервиса (Тип: {target_type}). "
+                    f"Ожидайте, скоро вам придет коммерческое предложение в ЛС!"
+                ),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+            
     lines = callback.message.text.split("\n")
     clean_lines = [l for l in lines if not l.startswith("📊 Статус:") and not l.startswith("🧑‍💻")]
     updated_text = "\n".join(clean_lines) + f"\n📊 Статус: <code>{new_status}</code>\n🧑‍💻 Менеджер: {manager_username}"
@@ -419,7 +469,7 @@ async def show_partner_cabinet(message_or_callback, user_id, username, state: FS
     else:
         partner_code = username if username else str(user_id)
         bot_info = await bot.get_me()
-        ref_link = f"https://t.me/{bot_info.username}?start={partner_code}"
+        ref_link = f"https://t.me{bot_info.username}?start={partner_code}"
         
         level_1, level_2, sub_partners = get_partner_stats(partner_code)
         stats_text = (
@@ -505,7 +555,7 @@ async def process_channel_revenue(message: types.Message, state: FSMContext):
     idx = data['current_index']
     revenues = data['revenues']
     
-    revenues[queue[idx][0]] = revenue
+    revenues[queue[idx]] = revenue
     await state.update_data(revenues=revenues, current_index=idx + 1)
     await ask_next_channel_revenue(message, state)
 
@@ -542,10 +592,12 @@ async def generate_final_report(message: types.Message, state: FSMContext):
         
     payout_sheet = "📋 <b>ВЕДОМОСТЬ ВЫПЛАТ ПАРТНЕРАМ:</b>\n"
     for partner, amount in partner_payouts.items():
-        payout_sheet += f"👤 <code>{partner}</code> — <b>{amount:.2f} руб.</b>\n"
         partner_tg_id = get_tg_id_by_code(partner)
+        wallet_addr = get_user_wallet(partner_tg_id) if partner_tg_id else "не указан"
+        
+        payout_sheet += f"👤 <code>{partner}</code> — <b>{amount:.2f} руб.</b>\n└ Кошелек: <code>{wallet_addr}</code>\n"
+        
         if partner_tg_id and amount > 0:
-            wallet_addr = get_user_wallet(partner_tg_id)
             try: 
                 await bot.send_message(
                     chat_id=partner_tg_id, 
@@ -554,7 +606,7 @@ async def generate_final_report(message: types.Message, state: FSMContext):
                 )
             except Exception: 
                 pass
-                
+
     final_report = (
         f"📊 <b>ОТЧЕТ И РАССЫЛКА</b>\n\n"
         f"{details_log}--------------------\n"
@@ -565,9 +617,9 @@ async def generate_final_report(message: types.Message, state: FSMContext):
     await message.answer(final_report, parse_mode="HTML")
 
 
-async def main():
+async def main(): 
     await dp.start_polling(bot)
 
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     asyncio.run(main())
