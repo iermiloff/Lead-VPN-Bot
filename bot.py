@@ -419,7 +419,7 @@ async def show_partner_cabinet(message_or_callback, user_id, username, state: FS
     else:
         partner_code = username if username else str(user_id)
         bot_info = await bot.get_me()
-        ref_link = f"https://t.me{bot_info.username}?start={partner_code}"
+        ref_link = f"https://t.me/{bot_info.username}?start={partner_code}"
         
         level_1, level_2, sub_partners = get_partner_stats(partner_code)
         stats_text = (
