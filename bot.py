@@ -562,4 +562,12 @@ async def generate_final_report(message: types.Message, state: FSMContext):
         f"💰 Всего вошло: <b>{total_received_money:.2f} руб.</b>\n"
         f"💵 Ваша чистая доля: <b>{total_clean_profit:.2f} руб.</b>"
     )
-await message.answer(final_report, parse_mode="HTML")async def main():await dp.start_polling(bot)if name == "main":asyncio.run(main())
+    await message.answer(final_report, parse_mode="HTML")
+
+
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
